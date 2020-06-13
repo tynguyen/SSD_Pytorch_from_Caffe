@@ -1,7 +1,8 @@
 from __future__ import division
 
 from models.prototxt_to_pytorch import CaffeNet
-from utils.logger import *
+from utils.tensorboard_writers import PytorchTBWriter
+from utils.logger import get_logger
 from utils.utils import *
 from utils.datasets import *
 from utils.parse_config import *
@@ -47,15 +48,15 @@ class Trainer(object):
         self.img_size    = opt.img_size
         self.epochs      = opt.epochs
         self.start_epoch = opt.start_epoch
-        self.saver       = Saver(opt)
+        self.ckpt_saver  = Saver(opt)
         
         # Save parameters
-        self.saver.save_experiment_config({'args': opt})
+        self.ckpt_saver.save_experiment_config({'args': opt})
         print("====================================================")
-        print(">> Save params, weights to %s"%self.saver.experiment_dir)
+        print(">> Save params, weights to %s"%self.ckpt_saver.experiment_dir)
 
-        self.tboard_summary = PytorchLogger(opt)
-        print(">> Save tboard logs to %s"%self.tboard_summary.log_dir)
+        self.tboard_writer = PytorchTBWriter(opt, opt.log_dir)
+        print(">> Save tboard logs to %s"%self.tboard_writer.log_dir)
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -70,9 +71,11 @@ class Trainer(object):
         
         # Get dataloader
         train_dataset = ListDataset(train_path, img_size=opt.img_size, augment=True,\
-                                        multiscale=opt.multiscale_training)
+                                        multiscale=opt.multiscale_training,\
+                                        square_make_type=opt.square_make_type)
         valid_dataset = ListDataset(valid_path, img_size=opt.img_size, augment=False, \
-                                        multiscale=False)
+                                        multiscale=False,\
+                                        square_make_type=opt.square_make_type)
 
         self.train_dataloader = torch.utils.data.DataLoader(
             train_dataset,
@@ -105,9 +108,11 @@ class Trainer(object):
         #TODO: load the pretrained ckpt. Select the one given to args.resume first. If not, use one 
         # given in args.pretrained_weights
         pretrained_weights = self.opt.resume
+        is_compare_with_saved_RMSE  = True # save a model only if it beats the RMSE of the pretrained model
         if not pretrained_weights:
             pretrained_weights = self.opt.pretrained_weights 
-        self.best_loss = 1e9
+            is_compare_with_saved_RMSE  = False 
+        self.best_RMSE = 1e9
         if pretrained_weights:
             ckpt = torch.load(pretrained_weights)
             try:
@@ -117,18 +122,17 @@ class Trainer(object):
                 else:
                     self.model.load_state_dict(ckpt)
                     print("=> Loaded ckpt %s using ckpt!"%(pretrained_weights))            
-
-            except:
-                print("=> Loaded ckpt %s using ckpt['state_dict']/ckpt does not work!"%(pretrained_weights))            
-                pass
-
-            try:
-                self.optimizer.load_state_dict(ckpt['optimizer'])
-                self.best_loss = ckpt['best_loss']
+                #self.optimizer.load_state_dict(ckpt['optimizer'])
                 self.start_epoch = ckpt['epoch']
-                print("=> Loaded ckpt %s, epoch %d, loss = %.4f"%(pretrained_weights, self.start_epoch, self.best_loss))            
+                if is_compare_with_saved_RMSE:
+                    self.best_RMSE = ckpt['best_RMSE']
+                    print("=> Resume ckpt %s, epoch %d, loss = %.4f"%(pretrained_weights, self.start_epoch, self.best_RMSE))            
+                else:
+                    print("=> Finetune ckpt %s, epoch %d"%(pretrained_weights, self.start_epoch))            
+                
             except:
-                print("=> Loaded ckpt %s"%(pretrained_weights))            
+                print("=> Loading ckpt %s using ckpt['state_dict']/ckpt NOT successful!"%(pretrained_weights))            
+                pass
 
         # Set output
         self.model.set_verbose(False) # Turn of forward ... printing 
@@ -148,10 +152,10 @@ class Trainer(object):
         for batch_i, (_, imgs, targets) in enumerate(self.train_dataloader):
             # Note that targets is (N*num_boxes) x 6 where 
             #   targets[i, 0] is the batch index
-            #   targets[i, 1] is the object id index (starting from 0)
+            #   targets[i, 1] is the object id index (starting from 1)
             #   targets[i, 2:6] is the object bbox (normalized to [0, 1]), in cx,cy,wh format 
             batches_done = len(self.train_dataloader) * epoch + batch_i 
-            self.scheduler(self.optimizer, batch_i, epoch, self.best_loss)
+            self.scheduler(self.optimizer, batch_i, epoch-self.start_epoch, self.best_RMSE)
             self.optimizer.zero_grad()
             
             #assert imgs.shape[2] == self.img_size, "Image size %d is not correct. Must be %d"%(imgs.shape[2], self.img_size)
@@ -182,7 +186,7 @@ class Trainer(object):
             self.optimizer.step()
     
             # Visualize loss
-            self.tboard_summary.list_of_scalars_summary(\
+            self.tboard_writer.list_of_scalars_summary(\
                     [
                         ('train/total_loss_iter', loss.item()),\
                         ('train/loss_l_iter', loss_l.item()),\
@@ -191,7 +195,7 @@ class Trainer(object):
                     ], batches_done)         
             # Visualize image & gt bboxes
             if batch_i % self.opt.write_image_interval == 0 and self.opt.write_image_interval > 0:
-                self.visualize_batch(batches_done, imgs, targets, self.tboard_summary)
+                self.visualize_batch(batches_done, imgs, targets, self.tboard_writer)
 
                 # Visualize BBox pred 
                 #blobs: Tupble with 'mbox_loss','mbox_conf', 'mbox_loc', 'detection_out' tensors
@@ -201,10 +205,10 @@ class Trainer(object):
                 neg_mask2 = detections[:, 3:] > 1.0 
                 detections[:, 3:][neg_mask1] = 0.001 
                 detections[:, 3:][neg_mask2] = 0.99 
-                self.visualize_batch(epoch, imgs, detections, self.tboard_summary, msg='train/pred_iter')
+                self.visualize_batch(epoch, imgs, detections, self.tboard_writer, msg='train/pred_iter')
     
 
-    def evaluating(self, epoch):
+    def validating(self, epoch):
         self.model.eval()
         num_batches = len(self.valid_dataloader)
         epoch_val_loss = 0
@@ -213,7 +217,7 @@ class Trainer(object):
         for batch_i, (_, imgs, targets) in enumerate(self.valid_dataloader):
             # Note that targets is (N*num_boxes) x 6 where 
             #   targets[i, 0] is the batch index
-            #   targets[i, 1] is the object id index (starting from 0)
+            #   targets[i, 1] is the object id index (starting from 1)
             #   targets[i, 2:6] is the object bbox (normalized to [0, 1]), in cx,cy,wh format 
             # Convert Darknet format to Pascal format 
             targets = darknet_2_pascal_targets(targets)
@@ -243,7 +247,7 @@ class Trainer(object):
 
             # Visualize image & gt bboxes
             if batch_i == 1:
-                self.visualize_batch(epoch, imgs, targets, self.tboard_summary, msg='val/gt_epoch')
+                self.visualize_batch(epoch, imgs, targets, self.tboard_writer, msg='val/gt_epoch')
                 # Get BBox errors
                 #blobs: Tupble with 'mbox_loss','mbox_conf', 'mbox_loc', 'detection_out' tensors
                 detections = blobs[-1]      
@@ -254,7 +258,7 @@ class Trainer(object):
                 detections[:, 3:][neg_mask2] = 0.99 
                 #detections = torch.masked_select(detections, mask1)
                 #detections = torch.masked_select(detections, mask2)
-                self.visualize_batch(epoch, imgs, detections, self.tboard_summary, msg='val/pred_epoch')
+                self.visualize_batch(epoch, imgs, detections, self.tboard_writer, msg='val/pred_epoch')
 
         epoch_val_loss /= num_batches
         epoch_loss_l   /= num_batches
@@ -267,14 +271,14 @@ class Trainer(object):
         logging.info(str2Print)
 
         # Visualize loss
-        self.tboard_summary.list_of_scalars_summary([('val/total_loss_epoch', epoch_val_loss)], epoch)         
-        self.tboard_summary.list_of_scalars_summary([('val/loss_l_epoch', epoch_loss_l)], epoch)         
-        self.tboard_summary.list_of_scalars_summary([('val/loss_c_epoch', epoch_loss_c)], epoch)         
+        self.tboard_writer.list_of_scalars_summary([('val/total_loss_epoch', epoch_val_loss)], epoch)         
+        self.tboard_writer.list_of_scalars_summary([('val/loss_l_epoch', epoch_loss_l)], epoch)         
+        self.tboard_writer.list_of_scalars_summary([('val/loss_c_epoch', epoch_loss_c)], epoch)         
             
         # Save model 
-        if epoch_val_loss < self.best_loss:
+        if epoch_val_loss < self.best_RMSE:
             is_best = True
-            self.saver.save_checkpoint({
+            self.ckpt_saver.save_checkpoint({
                                         'epoch': epoch,
                                          'state_dict': self.model.state_dict(),
                                          'optimizer': self.optimizer.state_dict(),
@@ -282,15 +286,16 @@ class Trainer(object):
                                         }, is_best)
 
             print(">> Successful epoch!")
-            print(">> Saving model %s"%self.saver.ckpt_path)
-            logging.info(">> Saving model %s"%self.saver.ckpt_path)
+            print(">> Saving model %s"%self.ckpt_saver.ckpt_path)
+            logging.info(">> Saving model %s"%self.ckpt_saver.ckpt_path)
+            self.best_RMSE = epoch_val_loss
         
         else:
-            print(">> Failed epoch since %.4f > %.4f!"%(epoch_val_loss, self.best_loss))
-            logging.info(">> Failed epoch since %.4f > %.4f!"%(epoch_val_loss, self.best_loss))
+            print(">> Failed epoch since %.4f > %.4f!"%(epoch_val_loss, self.best_RMSE))
+            logging.info(">> Failed epoch since %.4f > %.4f!"%(epoch_val_loss, self.best_RMSE))
 
     
-    def visualize_batch(self, step, imgs, targets, tboard_summary, msg='train/gt', max_imgs=2, max_box_per_class=10):
+    def visualize_batch(self, step, imgs, targets, tboard_writer, msg='train/gt', max_imgs=2, max_box_per_class=10):
         '''Visualize ground truth bboxes
         Inputs:
             targets N x 6 
@@ -340,7 +345,7 @@ class Trainer(object):
             for j in range(np_boxes.shape[1]):
                 colors[j] = self.tf_bbox_colors[int(labels[j])]
             tf_img = tf.image.draw_bounding_boxes(np_img, np_boxes, colors)
-            #with  tboard_summary.as_default():
+            #with  tboard_writer.as_default():
                 #tf.summary.image(msg, tf_img, step)
 
             draw_img = tf_img.numpy() 
@@ -348,14 +353,14 @@ class Trainer(object):
             list_draw_imgs.append(draw_img[np.newaxis,...])
         
         stacked_draw_imgs = np.concatenate(list_draw_imgs, 0)
-        tboard_summary.add_images(msg, stacked_draw_imgs, step) 
+        tboard_writer.add_images(msg, stacked_draw_imgs, step) 
         #print(">> VISUAL TIME: ", time.time() - start_t)
     
         
         
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--epochs", type=int, default=30, help="number of epochs")
+    parser.add_argument("--epochs", type=int, default=100, help="number of epochs")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
     parser.add_argument("--GPUs", type=int, default=0, help="GPU ID")
     parser.add_argument("--lr", type=float, default=1e-3, help="learning rate")
@@ -375,16 +380,15 @@ if __name__ == "__main__":
     parser.add_argument("--img_size", type=int, default=CROP_IMG_SIZE, help="size of each image dimension")
     parser.add_argument("--checkpoint_interval", type=int, default=1, help="interval between saving model weights")
     parser.add_argument("--evaluation_interval", type=int, default=1, help="interval evaluations on validation set")
-    parser.add_argument("--write_image_interval", type=int, default=500, help="interval writing images to tensorboard")
+    parser.add_argument("--write_image_interval", type=int, default=100, help="interval writing images to tensorboard")
     parser.add_argument("--compute_map", default=False, help="if True computes mAP every tenth batch")
     parser.add_argument("--multiscale_training", default=False, help="allow for multi-scale training")
+    parser.add_argument("--square_make_type", default='crop', help="How to make the input image have square shape", choices=['crop', 'pad'])
     parser.add_argument("--conf_thres", default=0.5, help="conf threshold", type=float)
     parser.add_argument("--nms_thres", default=0.5, help="nms threshold", type=float)
     parser.add_argument("--visdom", default='visdom', help="Use visdom to visualize or not", type=str)
 
     args = parser.parse_args()
-    print(args)
-    trainer = Trainer(args=args)
 
     if torch.cuda.is_available():
         if args.GPUs:
@@ -398,18 +402,23 @@ if __name__ == "__main__":
     
     if args.GPUs:
         cudnn.benchmark = True 
+
+    logging, log_experiment_dir = get_logger(args)
+    args.log_dir = log_experiment_dir
+    print(args)
+    trainer = Trainer(args=args)
    
 
-    # Make repos
-    os.makedirs(LOG_DIR_ROOT + "/logs", exist_ok=True)
-    os.makedirs(LOG_DIR_ROOT + "/output", exist_ok=True)
-    os.makedirs(LOG_DIR_ROOT + "/checkpoints", exist_ok=True)
+    ## Make repos
+    #os.makedirs(LOG_DIR_ROOT + "/logs", exist_ok=True)
+    #os.makedirs(LOG_DIR_ROOT + "/output", exist_ok=True)
+    #os.makedirs(LOG_DIR_ROOT + "/checkpoints", exist_ok=True)
 
     # Start training 
     for  epoch in range(trainer.start_epoch, trainer.epochs):
         trainer.training(epoch)
         
-        trainer.evaluating(epoch)
+        trainer.validating(epoch)
     
     
     

@@ -1,15 +1,25 @@
 # Convert SSD Model from Caffe to Pytorch
 This tool aims to load caffe prototxt and weights directly in pytorch without explicitly converting model from caffe to pytorch.
 Adopted from [this](https://github.com/marvis/pytorch-caffe)
+
 ***
 ## Prerequisites:
 - [ ] Pytorch >= 1.4
 - [ ] Python  >= 3.5
 We use Python3.7. To use other versions, change python version in script files such as run_demo.sh, run_train.sh
+- [ ] opencv >= 4.1
+```
+python3.7 -m pip3 install opencv-python==4.2.0.34
+``` 
 - [ ] **Important**: always run the following command when starting a new terminal.
 ```
 bash scripts/set_env.sh 
 ```
+Except python, all of these package requirements are given in docs_n_setups/package_requirements.txt and can be installed by running
+```
+bash scripts/set_env.sh 
+```
+*Note: replace python3.7 in script/set_env.sh with your python version.
 
 ***
 ## Train a model using the Caffe model's prototxt file  with Pytorch 
@@ -25,6 +35,17 @@ The second dimension of the tensor represents a box
 [batch_index, class_index, x1, y1, x2, y2]
 ```
 Where [x1,y1, x2,y2] are all normalized to [0,1].
+
+### How to make the input image square 
+SSD takes a square image as the input. Therefore, we need to make arbitrary images square. To do this, by default, we use center-cropping. However, there is an option to use center-cropping. Do it by chaning 
+``` 
+    --square_make_type crop 
+```
+with 
+```
+    --square_make_type pad
+```
+in run_train.sh, run_demo.sh
 
 ### Find the data statistics 
 ```
@@ -46,7 +67,13 @@ bash run_train.sh
 ***
 ## Test on images located in a folder
 ### Get the pretrained networks
-Pretrained model can be downloaded from [this link](https://drive.google.com/drive/folders/1fP9DXTmxrna_5vJyOA5pmvUO8uOq08Xn?usp=sharing)
+Pretrained model can be downloaded from [this v3](https://drive.google.com/drive/folders/1YacrogksZIh95Xpj8_b3MDtBuGxMXld_?usp=sharing)
+
+Older versions:
+* [v2](https://drive.google.com/drive/folders/1mhgPOiSk2hM5oje28-Gv8672856xbtie?usp=sharing)
+* [v1](https://drive.google.com/drive/folders/1fP9DXTmxrna_5vJyOA5pmvUO8uOq08Xn?usp=sharing)
+
+
 
 Download and save the pretrained_ckpt folder to the same repo with train.py
 
@@ -69,8 +96,115 @@ that is shown up to display predicted boxes.
 ### Output Example
 
 <p align="center">
-  <img width="460" height="300" src="example_images/test_img.png">
+  <img width="460" height="300" src="example_images/demo_detection.gif">
 </p>
+
+***
+## Customize the prior boxes 
+## Prior boxes used in the Original VOC_SSD300 model 
+Layer name                  | Feature size | perceptive field (step) | No of priorboxes/feature | Scale Aspects | min size | max size
+---                         |---           | ---                     | ---                      |---            |---       |---  
+conv4_3_norm_mbox_priorbox  |38x38  | 8  | 4 | 2,   | 030 | 060 | 
+fc7_mbox_priorbox           |19x19  | 16 | 6 | 2,3  | 60  | 111
+conv6_2_mbox_priorbox       |10x10  | 32 | 6 | 2,3  | 111 | 162
+conv7_2_mbox_priorbox       |05x05  | 64 | 6 | 2,3  | 162 | 213 
+conv8_2_mbox_priorbox       |03x03  | 100| 4 | 2,   | 213 | 264
+conv9_2_mbox_priorbox       |01x01  | 300| 4 | 2,   | 264 | 315
+
+## Our drone dataset
+In our dataset, object sizes concenstrate around 1/15 * image's width. For 300x300 input images, object's sizes are around 20 pixels. 
+The smallest is 1/18 ~ 16 pixels. One way to work around with these tiny objects is to do center crop the original images instead of zero padding.
+Since the original image's aspect ratio is (16/9), such cropping will significantly increase the object sizes. Effectively, the median size will be 20 x 16/9 = 35, 
+the min size is 16 x 16/9 = 28, the max size is 300 x 1/6 x 16/9 = 90. 
+For now, we still use padding to make the input images square. Using kmean clustering, we found the following clusters
+```
+n_clusters:13
+Accuracy: 86.60 %
+Boxes (normalized):
+ [[0.0604     0.02604375]
+ [0.1469     0.09376875]
+ [0.0792     0.04168125]
+ [0.1302     0.07914375]
+ [0.0823     0.05518125]
+ [0.0979     0.0604125 ]
+ [0.0542     0.01873125]
+ [0.1198     0.05833125]
+ [0.0823     0.031275  ]
+ [0.0583     0.03645   ]
+ [0.1083     0.0718875 ]
+ [0.0667     0.047925  ]
+ [0.099      0.04584375]]
+Boxes (in pixels):
+ [[18.12       7.813125 ]
+ [44.07      28.130627 ]
+ [23.76      12.5043745]
+ [39.06      23.743124 ]
+ [24.69      16.554375 ]
+ [29.37      18.12375  ]
+ [16.26       5.6193748]
+ [35.94      17.499374 ]
+ [24.69       9.3825   ]
+ [17.49      10.934999 ]
+ [32.49      21.56625  ]
+ [20.009998  14.3775   ]
+ [29.7       13.753125 ]]
+Ratios:
+ [1.3899999856948853, 1.4900000095367432, 1.5099999904632568, 1.5700000524520874, 1.600000023841858, 1.6200000047683716, 1.649999976158142, 1.899999976158142, 2.049999952316284, 2.1600000858306885, 2.319999933242798, 2.630000114440918, 2.890000104904175]
+```
+
+Using these clusters, we modify the prior boxes as follows, 
+Layer name                  | Feature size | perceptive field (step) | No of priorboxes/feature | Scale Aspects | min size | max size
+---                         |---           | ---                     | ---                      |---            |---       |---  
+conv4_3_norm_mbox_priorbox  |38x38  | 8  | 6 | 1.5, 2, 2.5, 3 | 015 | 30 | 
+fc7_mbox_priorbox           |19x19  | 16 | 5 | 1.5, 2, 2.5| 30 | 60
+conv6_2_mbox_priorbox       |10x10  | 32 | 4 | 1.5, 2     | 60 | 120
+conv7_2_mbox_priorbox       |05x05  | 64 | 3 | 1.5        | 120 | 200 
+conv8_2_mbox_priorbox       |03x03  | 100| 3 | 1.5        | 200 | 250 
+conv9_2_mbox_priorbox       |01x01  | 300| 0 | 
+
+Turn off flip option => each feature will have
+- [ ] + 1 ( 1:1 aspect ratio, by default)
+- [ ] + 1 x number of aspect ratios 
+- [ ] + 1 ( 1:1 aspect ratio with size = sqrt(min_size * max_size) 
+
+
+We have to compute the number of output for the following layers
+* 
+conv4_3_norm_mbox_loc 
+conv4_3_norm_mbox_conf 
+Size of output of conv4_3_norm_mbox_priorbox is 34656 = 38x38x6x4
+-> convolution_param { num_output: =
+38x38x6x4/(38x38) = 24 
+
+* 
+fc7_mbox_loc
+fc7_mbox_conf
+Size of output of fc7_mbox_priorbox  is 7220 = 19x19x5x4
+-> convolution_param { num_output: =
+19x19x5x4/(19x19) = 20 
+
+*
+conv6_2_mbox_loc
+conv6_2_mbox_conf 
+
+Size of output of conv6_2_mbox_priorbox  is 1600 = 10x10x4x4
+-> convolution_param { num_output: = 
+10x10x4x4/(10x10) = 16 
+
+* 
+conv7_2_mbox_loc
+conv7_2_mbox_conf
+Size of output of conv7_2_mbox_priorbox is 400 = 5x5x4x4
+-> convolution_param { num_output: = 
+5x5x4x4/(5x5) = 16 
+
+* 
+conv8_2_mbox_loc
+conv8_2_mbox_conf
+Size of output of conv8_2_mbox_priorbox is 144 = 3x3x4x4
+-> convolution_param { num_output: = 
+3x3x4x4/(3x3) = 16 
+
 
 ***
 ## SSD300 Caffe model structure (n=21 classes)

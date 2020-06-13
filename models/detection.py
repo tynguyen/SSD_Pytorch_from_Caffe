@@ -9,6 +9,7 @@ from torch.autograd import Function
 from torch.autograd import Variable
 import torch.nn.functional as F
 import pdb 
+import time 
 
 def point_form(boxes):
     """ Convert prior_boxes to (xmin, ymin, xmax, ymax)
@@ -191,6 +192,7 @@ def log_sum_exp(x):
 # Original author: Francisco Massa:
 # https://github.com/fmassa/object-detection.torch
 # Ported to PyTorch by Max deGroot (02/01/2017)
+
 def nms(boxes, scores, overlap=0.5, top_k=200):
     """Apply non-maximum suppression at test time to avoid detecting too many
     overlapping bounding boxes for a given object.
@@ -294,7 +296,6 @@ class Detection(nn.Module):
             where the last dim: [batch_i, cls idx, score, x1, y1, x2, y2] 
             with the range of x1,x2,y1,y2 is not so sure yet! 
         """
-
         num = loc.size(0)
         loc_data = loc.data
         conf_data = conf.data
@@ -322,6 +323,7 @@ class Detection(nn.Module):
             conf_preds = conf_data.view(num, num_priors,
                                         self.num_classes).transpose(2, 1)
         
+
         for i in range(num):
             decoded_boxes = decode(loc_data[i], prior_data, self.variance)
             #decoded_boxes: (tensor) xmin, ymin, xmax, ymax form of boxes.
@@ -353,8 +355,10 @@ class Detection(nn.Module):
                         #torch.cat((scores[ids[:count]].unsqueeze(1), \
                                    #boxes[ids[:count]]),1)
                 output.append(boxes)
-
-        output = torch.cat(output, 0) # B x 7
+        if len(output):
+            output = torch.cat(output, 0) # B x 7
+        else:
+            output = torch.zeros(1,7)
         print("------------------------------------------")
         print(">> Detection_output shape:", output.shape)
         print("------------------------------------------")
@@ -368,65 +372,6 @@ class Detection(nn.Module):
         #output = torch.cat((targets[:,:2], fake_scores, targets[:, 2:]), 1) 
         return output
 
-
-        ## Decode predictions into bboxes.
-        ##assert(num == 1)
-        #if num_classes == 2:
-        #    loc_data = loc_data[0].view(-1, 4).clone()
-        #    prior_data = center_size(prior_data[0][0].view(-1,4).clone())
-        #    decoded_boxes = decode(loc_data, prior_data, self.variance)
-        #    #decoded_boxes = clip_boxes(decoded_boxes)
-        #    
-        #    # For each class, perform nms
-        #    conf_scores = conf_preds[0].clone()
-        #    num_det = 0
-        #    cl = 1
-        #    c_mask = conf_scores[cl].gt(self.conf_thresh)
-        #    if c_mask.sum() == 0:
-        #        output = torch.Tensor([0.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0]).view(1,1,1,7)
-        #        return Variable(conf.data.new().resize_(output.size()).copy_(output))
-        #    scores = conf_scores[cl][c_mask]
-        #    l_mask = c_mask.unsqueeze(1).expand_as(decoded_boxes)
-        #    boxes = decoded_boxes[l_mask].view(-1, 4)
-        #    # idx of highest scoring and non-overlapping boxes per class
-        #    ids, count = nms(boxes, scores, self.nms_thresh, self.top_k)
-        #    count = min(count, self.keep_top_k)
-        #    extra_info = torch.FloatTensor([0.0, 1.0]).view(1,2).expand(num_priors,2)
-        #    extra_info = conf.data.new().resize_(extra_info.size()).copy_(extra_info)
-        #    output = torch.cat((extra_info[ids[:count]], scores[ids[:count]].unsqueeze(1),
-        #                   boxes[ids[:count]]), 1)
-        #        
-        #    #flt = self.output[:, :, :count, :].contiguous().view(-1, 5)
-        #    return Variable(output.unsqueeze(0).unsqueeze(0))
-        #else:
-        #    loc_data = loc_data[0].view(-1, 4).clone()
-        #    prior_data = center_size(prior_data[0][0].view(-1,4).clone())
-        #    decoded_boxes = decode(loc_data, prior_data, self.variance)
-        #    #decoded_boxes = clip_boxes(decoded_boxes)
-        #    
-        #    # For each class, perform nms
-        #    conf_scores = conf_preds[0].clone()
-        #    num_det = 0
-        #    cl = 1
-        #    outputs = []
-        #    for cl in range(1, num_classes):
-        #        c_mask = conf_scores[cl].gt(self.conf_thresh)
-        #        if c_mask.sum() == 0:
-        #            continue
-        #        scores = conf_scores[cl][c_mask]
-        #        l_mask = c_mask.unsqueeze(1).expand_as(decoded_boxes)
-        #        boxes = decoded_boxes[l_mask].view(-1, 4)
-        #        # idx of highest scoring and non-overlapping boxes per class
-        #        ids, count = nms(boxes, scores, self.nms_thresh, self.top_k)
-        #        count = min(count, self.keep_top_k)
-        #        extra_info = torch.FloatTensor([0.0, cl]).view(1,2).expand(count,2)
-        #        extra_info = conf.data.new().resize_(extra_info.size()).copy_(extra_info)
-        #        output = torch.cat((extra_info, scores[ids[:count]].unsqueeze(1),
-        #                       boxes[ids[:count]]), 1)
-        #        outputs.append(output)
-        #    outputs = torch.cat(outputs, 0)
-        #        #flt = self.output[:, :, :count, :].contiguous().view(-1, 5)
-        #    return Variable(outputs.unsqueeze(0).unsqueeze(0))
 
 class MultiBoxLoss(nn.Module):
     """SSD Weighted Loss Function
@@ -452,8 +397,10 @@ class MultiBoxLoss(nn.Module):
     """
 
     def __init__(self, num_classes, overlap_thresh, prior_for_matching,
-                 bkg_label, neg_mining, neg_pos, neg_overlap, use_gpu=True):
+                 bkg_label, neg_mining, neg_pos, neg_overlap, use_gpu=True, loc_weight=1.0):
         '''
+        Inputs:
+            loc_weight: weight for loss_l
         '''
         super(MultiBoxLoss, self).__init__()
         self.use_gpu = use_gpu
@@ -465,6 +412,8 @@ class MultiBoxLoss(nn.Module):
         self.negpos_ratio = neg_pos
         self.neg_overlap = neg_overlap
         self.variance = [0.1, 0.2]
+        
+        self.loss_l_weight = loc_weight
 
     def forward(self, loc_data, conf_data, priors, targets):
         """Multibox Loss
@@ -560,6 +509,7 @@ class MultiBoxLoss(nn.Module):
         conf_p = conf_data[(pos_mask+neg_mask).gt(0)].view(-1, self.num_classes)
         # Corresponding gt boxes 
         targets_weighted = conf_t[(pos+neg).gt(0)]
+
         loss_c = F.cross_entropy(conf_p, targets_weighted, size_average=False)
 
         # Sum of losses: L(x,c,l,g) = (Lconf(x, c) + ¦Áloc(x,l,g)) / N
@@ -567,7 +517,7 @@ class MultiBoxLoss(nn.Module):
         N = num_pos.data.sum()
         loss_l /= N
         loss_c /= N
-        total_loss = loss_l + loss_c
+        total_loss = (loss_l*self.loss_l_weight + loss_c)/(self.loss_l_weight + 1)
         print(">>|total Loss %.4f |Loss_l %.4f|Loss_c %.4f"%(total_loss, loss_l, loss_c))
         return {'total_loss':total_loss,\
                 'loss_l':loss_l,\

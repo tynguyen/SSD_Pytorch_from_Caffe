@@ -163,7 +163,6 @@ class CaffeNet(nn.Module):
                     i = i + 1 
                     continue
 
-
             if self.forward_data_only:
                 break
             
@@ -171,9 +170,14 @@ class CaffeNet(nn.Module):
             bnames = bname if type(bname) == list else [bname]
             if True:
                 bdatas = [self.blobs[name] for name in bnames]
+                #import time 
+                #start_t = time.time()
                 try:
                     tdatas = self._modules[lname](*bdatas)
+                    #print("Layer\t%31s\tTime:\t%8.5f\ts"%(lname, time.time()-start_t))
                 except:
+                    #pdb.set_trace()
+                    #tdatas = self._modules[lname](*bdatas)
                     raise TypeError("Wrong shape")
                     print("Layer:",lname)
                     print("Module: ",self._modules[lname])
@@ -524,7 +528,8 @@ class CaffeNet(nn.Module):
                 neg_mining = True
                 neg_pos = float(layer['multibox_loss_param']['neg_pos_ratio'])
                 neg_overlap = float(layer['multibox_loss_param']['neg_overlap'])
-                models[lname] = MultiBoxLoss(num_classes, overlap_threshold, prior_for_matching, bkg_label, neg_mining, neg_pos, neg_overlap, use_gpu=True)
+                loc_weight= float(layer['multibox_loss_param']['loc_weight'])
+                models[lname] = MultiBoxLoss(num_classes, overlap_threshold, prior_for_matching, bkg_label, neg_mining, neg_pos, neg_overlap, use_gpu=True, loc_weight=loc_weight)
                 blob_channels[tname] = 1
                 blob_width[tname] = 1
                 blob_height[tname] = 1
